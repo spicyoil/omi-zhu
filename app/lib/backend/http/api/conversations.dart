@@ -1049,6 +1049,11 @@ Future<UploadFilesResult> uploadLocalFilesV2(
   bool claimLiveCapture = false,
   Geolocation? geolocation,
 }) async {
+  // Omi Zhu: offline audio must never be sent to Omi. All offline uploads go
+  // through ArmOfflineUploader; this hard stop guards any path missed.
+  if (_omiOfflineUploadDisabled) {
+    throw UnsupportedError('Omi offline upload is disabled in this build');
+  }
   assertWalSyncFilesAreFramedBins(files.map((file) => file.path));
   String? captureManifest;
   if (shouldRequestSyncCaptureManifest(conversationId, claimLiveCapture)) {
@@ -1470,3 +1475,5 @@ Future<bool> seedOnboardingConversation() async {
   Logger.debug('seedOnboardingConversation: ${response.statusCode}');
   return response.statusCode == 200 || response.statusCode == 201;
 }
+
+const bool _omiOfflineUploadDisabled = true;

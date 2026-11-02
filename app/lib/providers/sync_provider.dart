@@ -474,8 +474,8 @@ class SyncProvider extends ChangeNotifier implements IWalServiceListener, IWalSy
         refreshPending: () => _refreshWals(_admittedWorkGeneration),
         drain: _drainEligibleWals,
         drainLiveCapture: _drainLiveCaptureWals,
-        autoUploadEnabled: () =>
-            !SharedPreferencesUtil().useCustomStt && SharedPreferencesUtil().autoSyncOfflineRecordings,
+        // Omi Zhu: offline audio goes to the ARM server, so custom STT no longer gates auto upload.
+        autoUploadEnabled: () => SharedPreferencesUtil().autoSyncOfflineRecordings,
         connectivityChanges: ConnectivityService().onConnectionChange,
         initiallyConnected: ConnectivityService().isConnected,
         onTransferAdmitted: () => _admittedWorkGeneration = _isDisposed ? -1 : _sessionGeneration,

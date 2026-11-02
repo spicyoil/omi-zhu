@@ -15,6 +15,8 @@ import 'package:omi/utils/l10n_extensions.dart';
 /// Returns `true` when the sync should proceed. For non-custom-STT users this is
 /// a no-op that always returns `true` (no dialog).
 Future<bool> confirmSyncForCustomStt(BuildContext context) async {
+  // Omi Zhu: offline files go to the ARM server, not Omi, so never prompt.
+  if (_armOfflineSync) return true;
   if (!SharedPreferencesUtil().useCustomStt) return true;
 
   final l = context.l10n;
@@ -28,3 +30,5 @@ Future<bool> confirmSyncForCustomStt(BuildContext context) async {
   );
   return confirmed ?? false;
 }
+
+const bool _armOfflineSync = true;

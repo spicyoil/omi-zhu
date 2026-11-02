@@ -41,6 +41,7 @@ import 'package:omi/services/wals/sync_upload_batch.dart';
 import 'package:omi/services/on_device/on_device_transcription_controller.dart';
 import 'package:omi/services/on_device/on_device_overflow_intake.dart';
 import 'package:omi/services/wals/sync_upload_gate.dart';
+import 'package:omi/services/wals/arm_offline_uploader.dart';
 import 'package:omi/services/wals/wal_evidence_runs.dart';
 import 'package:omi/utils/debug_log_manager.dart';
 import 'package:omi/utils/logger.dart';
@@ -271,6 +272,7 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
   SyncLocalFilesResponse? get accumulatedResponse => _accumulatedResponse;
 
   final SyncUploadGate? _uploadGateOverride;
+  // ignore: unused_element (Omi Zhu: Omi upload path replaced by ArmOfflineUploader)
   SyncUploadGate get _uploadGate => _uploadGateOverride ?? SyncUploadGate.instance;
 
   // Deterministic-replay seams: null means production wall clock, dart:async
@@ -1455,6 +1457,7 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
 
   String _durableKey(Wal wal) => '${wal.id}|${wal.filePath ?? wal.getFileName()}';
 
+  // ignore: unused_element (Omi Zhu: Omi upload path replaced by ArmOfflineUploader)
   String _uploadTelemetrySource(List<Wal> wals) => ClientTelemetry.uploadSourceForBatch([
         for (final wal in wals)
           (storage: wal.storage.name, originalStorage: wal.originalStorage?.name, device: wal.device),
@@ -2008,11 +2011,7 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
       return null;
     }
 
-    if (SyncRateLimiter.instance.isLimited) {
-      Logger.debug('Local upload: rate-limited until ${SyncRateLimiter.instance.until}, skipping');
-      DebugLogManager.logEvent('local_upload_rate_limited', {'until': '${SyncRateLimiter.instance.until}'});
-      return null;
-    }
+    // Omi Zhu: Omi's sync rate limiter does not apply to ARM uploads.
 
     DebugLogManager.logEvent('local_upload_started', {'walCount': wals.length});
 
@@ -2198,58 +2197,38 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
         // job_id later. Only WALs that actually became files (batchWals) are
         // mutated — corrupted ones already short-circuited above.
         if (!await reserveRefusalRetries(batchWals, generation, batchNowSeconds)) return resp;
-        final audioBounds = syncUploadAudioBounds(batchWals);
-        final result = await _uploadGate.upload(
-          files,
-          conversationId: batchWals.first.conversationId,
-          captureEvidence: captureEvidenceUploadHeader(batchWals, files),
-          recordingSessionId: batchWals.first.recordingSessionId,
-          audioStartSeconds: audioBounds.start,
-          audioEndSeconds: audioBounds.end,
-          claimLiveCapture: claimLiveCapture,
-          geolocation: batchWals.first.geolocation,
-          telemetrySource: _uploadTelemetrySource(batchWals),
-        );
-
-        _observeNativeUpload(batchWals);
-        if (result.completed != null) {
-          // 200 fast-path: server processed synchronously and returned a result.
-          final r = result.completed!;
-          final nowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
-          resp.newConversationIds.addAll(r.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-          resp.updatedConversationIds.addAll(
-            r.updatedConversationIds.where(
-              (id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id),
-            ),
-          );
-          for (final wal in batchWals) {
-            wal.status = WalStatus.synced;
-            wal.isSyncing = false;
-            wal.syncStartedAt = null;
-            wal.syncEtaSeconds = null;
-            if (wal.syncedAt == 0) wal.syncedAt = nowSeconds;
-            if (_isCurrent(generation)) listener.onWalSynced(wal);
-          }
-        } else {
-          // 202: audio safely received; processing in the background. Stamp the
-          // shared job_id and mark uploaded. The reconciler resolves this to
-          // synced / miss(retry) / corrupted out of the critical path. The
-          // local file is retained until confirmed synced.
-          final now = _now().millisecondsSinceEpoch ~/ 1000;
-          _jobPoller.defer(result.jobId!, result.pollAfterMs);
-          for (final wal in batchWals) {
-            wal.status = WalStatus.uploaded;
-            wal.jobId = result.jobId;
-            wal.uploadedAt = now;
-            wal.isSyncing = false;
-            wal.syncStartedAt = null;
-            wal.syncEtaSeconds = null;
-          }
-          _notifyUpdated(generation);
+        // Omi Zhu: offline audio goes only to the ARM server, never to Omi.
+        // A WAL is finished (synced + phone copy deleted) only when the server
+        // returned 200 and confirmed that file stored with a matching sha256.
+        final armResult = await ArmOfflineUploader.upload(files);
+        final nowSeconds = _now().millisecondsSinceEpoch ~/ 1000;
+        final confirmedWals = <Wal>[];
+        for (var i = 0; i < batchWals.length; i++) {
+          final wal = batchWals[i];
+          wal.isSyncing = false;
+          wal.syncStartedAt = null;
+          wal.syncEtaSeconds = null;
+          if (!armResult.confirmedPaths.contains(files[i].path)) continue;
+          wal.status = WalStatus.synced;
+          if (wal.syncedAt == 0) wal.syncedAt = nowSeconds;
+          confirmedWals.add(wal);
+          if (_isCurrent(generation)) listener.onWalSynced(wal);
         }
-
-        _clearRecoveryMarkers(batchWals, generation);
-        batchesCompleted++;
+        _clearRecoveryMarkers(confirmedWals, generation);
+        for (final wal in confirmedWals) {
+          await _deleteWal(wal, generation: generation);
+        }
+        await _saveWalsToFile(generation);
+        _notifyUpdated(generation);
+        if (confirmedWals.length == batchWals.length) {
+          batchesCompleted++;
+        } else {
+          batchesFailed++;
+          DebugLogManager.logEvent('arm_upload_partial', {
+            'confirmed': confirmedWals.length,
+            'batch': batchWals.length,
+          });
+        }
         serverUnavailableStreak = 0;
         reportUploadProgress();
       } on SyncRateLimitedException {
@@ -2492,60 +2471,25 @@ class LocalWalSyncImpl with WidgetsBindingObserver implements LocalWalSync {
     }
 
     try {
-      // Upload only — no poll-to-terminal. Reconciler resolves the job later.
-      final claimLiveCapture = canClaimLiveCapture(
-        [walToSync],
-        _wals
-            .where(
-              (candidate) => candidate.status == WalStatus.miss && candidate.conversationId == walToSync.conversationId,
-            )
-            .toList(),
-        _now().millisecondsSinceEpoch ~/ 1000,
-      );
-      final audioBounds = syncUploadAudioBounds([walToSync]);
-      final result = await _uploadGate.upload(
-        [walFile],
-        conversationId: walToSync.conversationId,
-        captureEvidence: captureEvidenceUploadHeader([walToSync], [walFile]),
-        recordingSessionId: walToSync.recordingSessionId,
-        audioStartSeconds: audioBounds.start,
-        audioEndSeconds: audioBounds.end,
-        claimLiveCapture: claimLiveCapture,
-        geolocation: walToSync.geolocation,
-        telemetrySource: _uploadTelemetrySource([walToSync]),
-      );
-
-      _observeNativeUpload([walToSync]);
-      if (result.completed != null) {
-        walToSync.holdForUser = false;
-        final r = result.completed!;
-        resp.newConversationIds.addAll(r.newConversationIds.where((id) => !resp.newConversationIds.contains(id)));
-        resp.updatedConversationIds.addAll(
-          r.updatedConversationIds.where(
-            (id) => !resp.updatedConversationIds.contains(id) && !resp.newConversationIds.contains(id),
-          ),
-        );
-        walToSync.status = WalStatus.synced;
-        walToSync.isSyncing = false;
-        walToSync.syncStartedAt = null;
-        walToSync.syncEtaSeconds = null;
-        if (walToSync.syncedAt == 0) {
-          walToSync.syncedAt = _now().millisecondsSinceEpoch ~/ 1000;
-        }
-        DebugLogManager.logInfo('Single WAL upload succeeded (fast-path)', {'walId': wal.id});
-        if (_isCurrent(generation)) listener.onWalSynced(wal);
-      } else {
-        final now = _now().millisecondsSinceEpoch ~/ 1000;
-        walToSync.status = WalStatus.uploaded;
-        walToSync.jobId = result.jobId;
-        _jobPoller.defer(result.jobId!, result.pollAfterMs);
-        walToSync.uploadedAt = now;
-        walToSync.isSyncing = false;
-        walToSync.syncStartedAt = null;
-        walToSync.syncEtaSeconds = null;
-        DebugLogManager.logInfo('Single WAL uploaded; reconciler will finish', {'walId': wal.id});
-        _notifyUpdated(generation);
+      // Omi Zhu: offline audio goes only to the ARM server, never to Omi.
+      final armResult = await ArmOfflineUploader.upload([walFile]);
+      walToSync.isSyncing = false;
+      walToSync.syncStartedAt = null;
+      walToSync.syncEtaSeconds = null;
+      if (!armResult.confirmedPaths.contains(walFile.path)) {
+        // Not confirmed: keep the phone copy for retry on the next sync.
+        throw const ArmUploadException('ARM server did not confirm the file');
       }
+      walToSync.holdForUser = false;
+      walToSync.status = WalStatus.synced;
+      if (walToSync.syncedAt == 0) {
+        walToSync.syncedAt = _now().millisecondsSinceEpoch ~/ 1000;
+      }
+      DebugLogManager.logInfo('Single WAL uploaded to ARM', {'walId': wal.id});
+      if (_isCurrent(generation)) listener.onWalSynced(wal);
+      _clearRecoveryMarkers([walToSync], generation);
+      // Server confirmed: drop the phone copy. Index is saved below.
+      await _deleteWal(walToSync, generation: generation);
     } on SyncRateLimitedException {
       // Account-level rate limit — leave the WAL pending without consuming its
       // retry budget. The global upload gate owns the cooldown.
