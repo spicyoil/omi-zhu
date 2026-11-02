@@ -70,8 +70,8 @@ android {
     productFlavors {
         prod {
             dimension "flavor-type"
-            applicationId "com.friend.ios"
-            resValue "string", "app_name", "Omi"
+            applicationId "com.friend.ios.arm"  // omi-arm: side-by-side with store app (com.friend.ios)
+            resValue "string", "app_name", "Omi ARM"
         }
         dev {
             dimension "flavor-type"
@@ -183,6 +183,7 @@ dependencies {
 
 // Local dev uses the non-production Firebase emulator project. Do not try to
 // upload its mapping files to Crashlytics; production variants retain uploads.
-tasks.matching { task -> task.name.startsWith('uploadCrashlyticsMappingFileDev') }.configureEach {
+// omi-arm: never upload mapping files from this side-by-side build to the production Crashlytics app.
+tasks.matching { task -> task.name.startsWith('uploadCrashlyticsMappingFile') }.configureEach {
     enabled = false
 }

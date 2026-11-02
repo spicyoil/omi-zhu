@@ -32,7 +32,7 @@ enum AppEnvironmentProfile {
     name: 'production',
     defaultApiBaseUrl: 'https://api.omi.me/',
     firebaseProjectId: 'based-hardware',
-    authCallbackScheme: 'omi',
+    authCallbackScheme: 'omi-arm', // omi-arm side-by-side build (store app keeps omi://)
     usesFirebaseAuthEmulator: false,
     allowsProductionData: true,
   );
