@@ -9,8 +9,12 @@ import 'package:http/http.dart' as http;
 /// server instead of Omi's `/v2/sync-local-files`.
 ///
 /// Privacy contract:
-/// - Only the ARM bearer token (from `--dart-define=ARM_UPLOAD_TOKEN=...`) is
-///   sent. No Omi/Firebase auth header, no Omi app headers.
+/// - The upload URL (`--dart-define=ARM_UPLOAD_URL`) and bearer token
+///   (`--dart-define=ARM_UPLOAD_TOKEN`) are both required. If either is empty,
+///   upload is refused and the files stay on the phone. There is no fallback
+///   to Omi's upload.
+/// - Only the ARM bearer token is sent. No Omi/Firebase auth header, no Omi
+///   app headers.
 /// - The token is never logged, printed, or included in exception messages.
 ///
 /// A file counts as delivered only when the server answers HTTP 200 and lists
@@ -19,16 +23,18 @@ import 'package:http/http.dart' as http;
 class ArmOfflineUploader {
   ArmOfflineUploader._();
 
-  static const String endpoint = 'https://arm.iot843.com/omi-offline';
+  static const String _uploadUrl = String.fromEnvironment('ARM_UPLOAD_URL');
   static const String _token = String.fromEnvironment('ARM_UPLOAD_TOKEN');
 
-  static bool get isConfigured => _token.isNotEmpty;
+  static bool get isConfigured => _uploadUrl.trim().isNotEmpty && _token.trim().isNotEmpty;
 
   /// Uploads [files] in one multipart request. Returns the absolute paths the
   /// server confirmed (stored + matching sha256). Throws [ArmUploadException]
   /// on transport/HTTP/parse failure; nothing is confirmed in that case.
   static Future<ArmUploadResult> upload(List<File> files) async {
-    if (!isConfigured) throw const ArmUploadException('ARM upload token not configured in this build');
+    if (!isConfigured) {
+      throw const ArmUploadException('ARM upload is not configured in this build');
+    }
 
     // One entry per distinct path; the server identifies files by basename, so
     // a second distinct path with the same basename waits for the next pass.
@@ -46,8 +52,8 @@ class ArmOfflineUploader {
       totalBytes += await entry.value.length();
     }
 
-    final request = http.MultipartRequest('POST', Uri.parse(endpoint));
-    request.headers['Authorization'] = 'Bearer $_token';
+    final request = http.MultipartRequest('POST', Uri.parse(_uploadUrl.trim()));
+    request.headers['Authorization'] = 'Bearer ${_token.trim()}';
     request.headers['Accept'] = 'application/json';
     for (final entry in byName.entries) {
       request.files.add(await http.MultipartFile.fromPath('files', entry.value.path, filename: entry.key));
